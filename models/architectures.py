@@ -423,12 +423,7 @@ class KPFCNN(nn.Module):
             N = outputs.shape[0]
             eps = 1e-8
             tensor_0 = torch.tensor(0).float().cuda()
-            threshold = config.contrast_thd / 100           
-            
-            # test threshold. Maybe the pseudo_logits have much higher probs here -jer
-            # Well it seems like the probs are usually inbetween 0.11 and 0.21. So the threshold doesn't do anything here
-            # I guess then the whole contrast loss doesn't work properly for DALES (maybe mention that in thesis)
-            # ALso test this when having higher epochs...
+            threshold = config.contrast_thd / 100
             
             # Get probabilities
             prob = torch.nn.Softmax(1)(outputs) 
@@ -580,7 +575,7 @@ class KPFCNN_mprm(nn.Module):
                 r *= 2
                 out_dim *= 2
         
-        self.multi_att = dual_att('attention', out_dim, out_dim, r, layer, config)
+        self.multi_att = multi_path_att('attention', out_dim, out_dim, r, layer, config)
         self.ele_head = ele_att('ele_attention', 2, out_dim, r, layer, config)
         self.no_ga = global_average_block('ga1', config.num_classes, config.num_classes, layer, config)
         self.da_ga = global_average_block('ga2', config.num_classes, config.num_classes, layer, config)
@@ -684,28 +679,29 @@ class KPFCNN_mprm(nn.Module):
         x = self.ele_head(x, ele_down, batch)
             
         # Combine attention modules and save logits
-        spa_att, cha_att, no_att, dual_att = self.multi_att(x, batch)
+        spa_att, cha_att, no_att, poi_att = self.multi_att(x, batch)
 
+        # Perform global average pooling
         no_att_cla = self.no_ga(no_att, batch)
-        dual_att_cla = self.da_ga(dual_att, batch)
+        poi_att_cla = self.da_ga(poi_att, batch)
         spa_att_cla = self.spa_ga(spa_att, batch)
         cha_att_cla = self.cha_ga(cha_att, batch)  
-        
-        cla_logits = [no_att_cla, dual_att_cla, spa_att_cla, cha_att_cla]
+        cla_logits = [no_att_cla, poi_att_cla, spa_att_cla, cha_att_cla]
         
         # Loop over consecutive decoder blocks
         for block_i, block_op in enumerate(self.decoder_blocks):
             no_att = block_op(no_att, batch)
-            dual_att = block_op(dual_att, batch)
+            poi_att = block_op(poi_att, batch)
             spa_att = block_op(spa_att, batch)
             cha_att = block_op(cha_att, batch)
 
         # Element-wise maximum to get pseudo labels
-        x = torch.max(no_att, dual_att)
+        x = torch.max(no_att, poi_att)
         x = torch.max(x, spa_att)
         x = torch.max(x, cha_att)
             
-        cam = [no_att, dual_att, spa_att, cha_att]
+        # Grab point class activation maps
+        cam = [no_att, poi_att, spa_att, cha_att]
         
         return x, cla_logits, cam
    
@@ -751,25 +747,31 @@ class KPFCNN_mprm(nn.Module):
         all_cls_lbs = []
         self.output_loss = 0
         cam_all = torch.stack(cam, dim=0)
-        star_id = 0
+        start_id = 0
 
-        # Loop over all regions
+        # Loop over all regions (input spheres)
         for ri in range(len(regions_all)):
-            regions = regions_all[ri]
-            end_id = star_id + batch_lengths[ri]
-            logits = cam_all[:,star_id:end_id,:]
 
-            # Retrieve ground truth weak labels
-            all_cls_lbs.append(np.stack(regions_lb[ri]).astype('float32'))
+            # Determine correct end index of input sphere from batch lengths
+            end_id = start_id + batch_lengths[ri]
 
-            # Retrieve weak labels based on output logits (predicted)
-            for ii in range(len(regions)):
-                slc_dix = regions[ii].astype('int64') 
-                slc_dix = torch.from_numpy(slc_dix).cuda()
-                assert logits.shape[1] >= torch.max(slc_dix), 'logits problem'
-                averaged_features.append(torch.mean(logits[:,slc_dix,:], dim=1))
+            # Check if input sphere has subclouds (important for active learning)
+            if regions_all[ri]:
+                regions = regions_all[ri]
+                logits = cam_all[:,start_id:end_id,:]
 
-            star_id = star_id + batch_lengths[ri]
+                # Retrieve ground-truth weak labels for all subspheres within the whole input sphere
+                all_cls_lbs.append(np.stack(regions_lb[ri]).astype('float32'))
+
+                # Retrieve weak labels of each subregion based on output logits (predicted)
+                for subregion in range(len(regions)):
+                    slc_dix = regions[subregion].astype('int64')
+                    slc_dix = torch.from_numpy(slc_dix).cuda()
+                    assert logits.shape[1] >= torch.max(slc_dix), 'logits problem'
+                    averaged_features.append(torch.mean(logits[:,slc_dix,:], dim=1))
+
+            # Update start index for next input sphere
+            start_id = start_id + batch_lengths[ri]
         
         # Stack weak labels (ground truth and predicted) and calculate loss
         all_cls_lbs = np.vstack(all_cls_lbs)
