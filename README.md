@@ -1,7 +1,7 @@
 # Weakly Supervised Active Learning
 Combination of weakly supervised learning and active learning for 3D point cloud classification with minimum labeling effort.
 
-![Overview](https://user-images.githubusercontent.com/51992212/192232324-7405cb27-1fe2-4433-90e5-877c0e0b12fc.png)
+![Overview](https://user-images.githubusercontent.com/51992212/193449535-a0d5eb9f-ffbf-4253-ac92-f46b26529b68.png)
 
 Graphical overview of the WeaSAL network workflow (adapted from Lin, Y., G. Vosselman, and M. Y. Yang (2022): "Weakly supervised semantic segmentation of airborne laser scanning point clouds", Figure 1)
 
